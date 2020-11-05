@@ -27,40 +27,48 @@ import (
 	configv1 "github.com/openshift/api/config/v1"
 	apimachineryversion "k8s.io/apimachinery/pkg/version"
 
-	"github.com/openshift/insights-operator/pkg/authorizer"
+	"github.com/redhatinsights/insights-ingress-http-client/authorizer"
 )
 
 const (
 	responseBodyLogLen = 1024
 )
 
+// Client The client structure for making requests to cloud.redhat.com
 type Client struct {
-	client      *http.Client
-	maxBytes    int64
-	metricsName string
+	client       *http.Client
+	maxBytes     int64
+	metricsName  string
+	operatorName string
+	mimeType     string
 
 	authorizer  Authorizer
 	clusterInfo ClusterVersionInfo
 }
 
+// Authorizer An interface for adding authorization and proxy information the request
 type Authorizer interface {
 	Authorize(req *http.Request) error
 	NewSystemOrConfiguredProxy() func(*http.Request) (*url.URL, error)
 }
 
+// ClusterVersionInfo An interface for the cluster version object
 type ClusterVersionInfo interface {
 	ClusterVersion() *configv1.ClusterVersion
 }
 
+// Source An object for storing data of multiple types
 type Source struct {
 	ID       string
 	Type     string
 	Contents io.Reader
 }
 
+// ErrWaitingForVersion An error due to cluster version responding slowly
 var ErrWaitingForVersion = fmt.Errorf("waiting for the cluster version to be loaded")
 
-func New(client *http.Client, maxBytes int64, metricsName string, authorizer Authorizer, clusterInfo ClusterVersionInfo) *Client {
+// New Initialize a new client object
+func New(client *http.Client, maxBytes int64, metricsName string, operatorName string, mimeType string, authorizer Authorizer, clusterInfo ClusterVersionInfo) *Client {
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -68,16 +76,18 @@ func New(client *http.Client, maxBytes int64, metricsName string, authorizer Aut
 		maxBytes = 10 * 1024 * 1024
 	}
 	return &Client{
-		client:      client,
-		maxBytes:    maxBytes,
-		metricsName: metricsName,
-		authorizer:  authorizer,
-		clusterInfo: clusterInfo,
+		client:       client,
+		maxBytes:     maxBytes,
+		metricsName:  metricsName,
+		operatorName: operatorName,
+		mimeType:     mimeType,
+		authorizer:   authorizer,
+		clusterInfo:  clusterInfo,
 	}
 }
 
 func getTrustedCABundle() (*x509.CertPool, error) {
-	caBytes, err := ioutil.ReadFile("/var/run/configmaps/trusted-ca-bundle/ca-bundle.crt")
+	caBytes, err := ioutil.ReadFile("/var/run/configmaps/trusted-ca-bundle/ca-bundle.crt") //Should this be parameterized?
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -119,16 +129,22 @@ func clientTransport(authorizer Authorizer) http.RoundTripper {
 	return transport.DebugWrappers(clientTransport)
 }
 
-func userAgent(releaseVersionEnv string, v apimachineryversion.Info, cv *configv1.ClusterVersion) string {
+func userAgent(operatorName string, releaseVersionEnv string, v apimachineryversion.Info, cv *configv1.ClusterVersion) string {
 	gitVersion := v.GitVersion
 	// If the RELEASE_VERSION is set in pod, use it
 	if releaseVersionEnv != "" {
 		gitVersion = releaseVersionEnv
 	}
 	gitVersion = fmt.Sprintf("%s-%s", gitVersion, v.GitCommit)
-	return fmt.Sprintf("insights-operator/%s cluster/%s", gitVersion, cv.Spec.ClusterID)
+	return fmt.Sprintf("%s/%s cluster/%s", operatorName, gitVersion, cv.Spec.ClusterID)
 }
 
+// GetMimeType Accessor for the client mimeType
+func (c *Client) GetMimeType() string {
+	return c.mimeType
+}
+
+// Send Posts source data to an endpoint
 func (c *Client) Send(ctx context.Context, endpoint string, source Source) error {
 	cv := c.clusterInfo.ClusterVersion()
 	if cv == nil {
@@ -144,7 +160,7 @@ func (c *Client) Send(ctx context.Context, endpoint string, source Source) error
 		req.Header = make(http.Header)
 	}
 	releaseVersionEnv := os.Getenv("RELEASE_VERSION")
-	ua := userAgent(releaseVersionEnv, version.Get(), cv)
+	ua := userAgent(c.operatorName, releaseVersionEnv, version.Get(), cv)
 	req.Header.Set("User-Agent", ua)
 	if err := c.authorizer.Authorize(req); err != nil {
 		return err

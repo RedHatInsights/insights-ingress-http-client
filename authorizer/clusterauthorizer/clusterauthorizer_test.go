@@ -8,7 +8,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/openshift/insights-operator/pkg/config"
+	"github.com/redhatinsights/insights-ingress-http-client/config"
 	"golang.org/x/net/http/httpproxy"
 )
 
@@ -24,7 +24,7 @@ func TestProxy(tt *testing.T) {
 		Name       string
 		EnvValues  map[string]interface{}
 		RequestURL string
-		HttpConfig config.HTTPConfig
+		HTTPConfig config.HTTPConfig
 		ProxyURL   string
 	}{
 		{
@@ -49,35 +49,35 @@ func TestProxy(tt *testing.T) {
 			Name:       "Env not set, specific proxy set",
 			EnvValues:  map[string]interface{}{"HTTP_PROXY": nil},
 			RequestURL: "http://google.com",
-			HttpConfig: config.HTTPConfig{HTTPProxy: "specproxy.to"},
+			HTTPConfig: config.HTTPConfig{HTTPProxy: "specproxy.to"},
 			ProxyURL:   "http://specproxy.to",
 		},
 		{
 			Name:       "Env set, specific proxy set http",
 			EnvValues:  map[string]interface{}{"HTTP_PROXY": "envproxy.to"},
 			RequestURL: "http://google.com",
-			HttpConfig: config.HTTPConfig{HTTPProxy: "specproxy.to"},
+			HTTPConfig: config.HTTPConfig{HTTPProxy: "specproxy.to"},
 			ProxyURL:   "http://specproxy.to",
 		},
 		{
 			Name:       "Env set, specific proxy set https",
 			EnvValues:  map[string]interface{}{"HTTPS_PROXY": "envsecproxy.to"},
 			RequestURL: "https://google.com",
-			HttpConfig: config.HTTPConfig{HTTPProxy: "specsecproxy.to"},
+			HTTPConfig: config.HTTPConfig{HTTPProxy: "specsecproxy.to"},
 			ProxyURL:   "http://specsecproxy.to",
 		},
 		{
 			Name:       "Env set, specific proxy set noproxy, request without noproxy",
 			EnvValues:  map[string]interface{}{"HTTPS_PROXY": "envsecproxy.to", "NO_PROXY": "envnoproxy.to"},
 			RequestURL: "https://google.com",
-			HttpConfig: config.HTTPConfig{HTTPProxy: "specsecproxy.to", NoProxy: "specnoproxy.to"},
+			HTTPConfig: config.HTTPConfig{HTTPProxy: "specsecproxy.to", NoProxy: "specnoproxy.to"},
 			ProxyURL:   "http://specsecproxy.to",
 		},
 		{
 			Name:       "Env set, specific proxy set noproxy, request with noproxy",
 			EnvValues:  map[string]interface{}{"HTTPS_PROXY": "envsecproxy.to", "NO_PROXY": "envnoproxy.to"},
 			RequestURL: "https://specnoproxy.to",
-			HttpConfig: config.HTTPConfig{HTTPProxy: "specsecproxy.to", NoProxy: "specnoproxy.to"},
+			HTTPConfig: config.HTTPConfig{HTTPProxy: "specsecproxy.to", NoProxy: "specnoproxy.to"},
 			ProxyURL:   "",
 		},
 	}
@@ -95,7 +95,7 @@ func TestProxy(tt *testing.T) {
 				}
 			}
 
-			co2 := &testConfig{config: &config.Controller{HTTPConfig: tc.HttpConfig}}
+			co2 := &testConfig{config: &config.Configuration{HTTPConfig: tc.HTTPConfig}}
 			a := Authorizer{proxyFromEnvironment: nonCachedProxyFromEnvironment(), configurator: co2}
 			p := a.NewSystemOrConfiguredProxy()
 			req := httptest.NewRequest("GET", tc.RequestURL, nil)
@@ -113,10 +113,10 @@ func TestProxy(tt *testing.T) {
 }
 
 type testConfig struct {
-	config *config.Controller
+	config *config.Configuration
 }
 
-func (t *testConfig) Config() *config.Controller {
+func (t *testConfig) Config() *config.Configuration {
 	return t.config
 }
 
