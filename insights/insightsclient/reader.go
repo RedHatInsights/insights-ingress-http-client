@@ -10,6 +10,7 @@ type limitReadCloser struct {
 	closer io.ReadCloser
 }
 
+// NewLimitReadCloser Initialize a new limitReadCloser object
 func NewLimitReadCloser(r io.ReadCloser, n int64) io.ReadCloser {
 	return limitReadCloser{
 		Reader: LimitReader(r, n),
@@ -21,6 +22,7 @@ func (c limitReadCloser) Close() error {
 	return c.closer.Close()
 }
 
+// ErrTooLong An error for sample data that is too long
 var ErrTooLong = fmt.Errorf("the incoming sample data is too long")
 
 // LimitReader returns a Reader that reads from r

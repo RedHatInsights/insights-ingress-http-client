@@ -12,25 +12,29 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	"github.com/openshift/insights-operator/pkg/authorizer"
-	"github.com/openshift/insights-operator/pkg/config"
-	"github.com/openshift/insights-operator/pkg/controllerstatus"
-	"github.com/openshift/insights-operator/pkg/insights/insightsclient"
+	"github.com/redhatinsights/insights-ingress-http-client/authorizer"
+	"github.com/redhatinsights/insights-ingress-http-client/config"
+	"github.com/redhatinsights/insights-ingress-http-client/controllerstatus"
+	"github.com/redhatinsights/insights-ingress-http-client/insights/insightsclient"
 )
 
+// Configurator An interface for managing the configuration data
 type Configurator interface {
-	Config() *config.Controller
+	Config() *config.Configuration
 	ConfigChanged() (<-chan struct{}, func())
 }
 
+// Authorizer An interface for determining if an error is related to authorization
 type Authorizer interface {
 	IsAuthorizationError(error) bool
 }
 
+// Summarizer An interface for peforming an summary
 type Summarizer interface {
 	Summary(ctx context.Context, since time.Time) (io.ReadCloser, bool, error)
 }
 
+// StatusReporter An interface for providing stats around reporting
 type StatusReporter interface {
 	LastReportedTime() time.Time
 	SetLastReportedTime(time.Time)
@@ -38,6 +42,7 @@ type StatusReporter interface {
 	SetSafeInitialStart(s bool)
 }
 
+// Controller An object for processing a summary
 type Controller struct {
 	controllerstatus.Simple
 
@@ -47,6 +52,7 @@ type Controller struct {
 	reporter     StatusReporter
 }
 
+// New Initialize a new Controller object
 func New(summarizer Summarizer, client *insightsclient.Client, configurator Configurator, statusReporter StatusReporter) *Controller {
 	return &Controller{
 		Simple: controllerstatus.Simple{Name: "insightsuploader"},
@@ -58,6 +64,7 @@ func New(summarizer Summarizer, client *insightsclient.Client, configurator Conf
 	}
 }
 
+// Run Execute the payload upload
 func (c *Controller) Run(ctx context.Context) {
 	c.Simple.UpdateStatus(controllerstatus.Summary{Healthy: true})
 
@@ -131,7 +138,7 @@ func (c *Controller) Run(ctx context.Context) {
 			klog.V(4).Infof("Uploading latest report since %s", lastReported.Format(time.RFC3339))
 			if err := c.client.Send(ctx, endpoint, insightsclient.Source{
 				ID:       id,
-				Type:     "application/vnd.redhat.openshift.periodic",
+				Type:     c.client.GetMimeType(),
 				Contents: source,
 			}); err != nil {
 				klog.V(2).Infof("Unable to upload report after %s: %v", time.Now().Sub(start).Truncate(time.Second/100), err)
