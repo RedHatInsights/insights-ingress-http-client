@@ -50,6 +50,6 @@ git tag v1.0.0
 
 This library needs to collect the pull secret information from the openshift-config namespace.
 A template for the cluster role and role binding exist in `templates/cluster_role.yaml`.
-You must replace the `OPERATOR_SERVICE_ACCOUNT` and `OPERATOR_NAMESPACE` for the role binding.
-`make gen-cluster-role SERVICE_ACCOUNT=myoperator NAMESPACE=default` will create a `cluster_role.yaml`
+You must replace the `OPERATOR_SERVICE_ACCOUNT`, `OPERATOR_NAMESPACE`, and `OPERATOR_PREFIX` for the role binding.
+`make gen-cluster-role SERVICE_ACCOUNT=myoperator NAMESPACE=default OPERATOR_PREFIX=myprefix` will create a `cluster_role.yaml`
 file in the `manifests` directory replacing the placeholders with the supplied values.
