@@ -13,3 +13,6 @@
 
 # Dependency directories (remove the comment below to include it)
 vendor/
+
+# Generated cluster role from make file
+manifests/cluster_role.yaml
