@@ -17,7 +17,9 @@ import (
 	"strconv"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/pkg/version"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
 	"k8s.io/component-base/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
@@ -25,6 +27,7 @@ import (
 	"k8s.io/klog"
 
 	configv1 "github.com/openshift/api/config/v1"
+	configv1client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
 	apimachineryversion "k8s.io/apimachinery/pkg/version"
 
 	"github.com/redhatinsights/insights-ingress-http-client/authorizer"
@@ -42,19 +45,15 @@ type Client struct {
 	operatorName string
 	mimeType     string
 
-	authorizer  Authorizer
-	clusterInfo ClusterVersionInfo
+	authorizer     Authorizer
+	kubeConfig     *rest.Config
+	clusterVersion *configv1.ClusterVersion
 }
 
 // Authorizer An interface for adding authorization and proxy information the request
 type Authorizer interface {
 	Authorize(req *http.Request) error
 	NewSystemOrConfiguredProxy() func(*http.Request) (*url.URL, error)
-}
-
-// ClusterVersionInfo An interface for the cluster version object
-type ClusterVersionInfo interface {
-	ClusterVersion() *configv1.ClusterVersion
 }
 
 // Source An object for storing data of multiple types
@@ -68,7 +67,7 @@ type Source struct {
 var ErrWaitingForVersion = fmt.Errorf("waiting for the cluster version to be loaded")
 
 // New Initialize a new client object
-func New(client *http.Client, maxBytes int64, metricsName string, operatorName string, mimeType string, authorizer Authorizer, clusterInfo ClusterVersionInfo) *Client {
+func New(client *http.Client, maxBytes int64, metricsName string, operatorName string, mimeType string, authorizer Authorizer, kubeConfig *rest.Config) *Client {
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -82,8 +81,23 @@ func New(client *http.Client, maxBytes int64, metricsName string, operatorName s
 		operatorName: operatorName,
 		mimeType:     mimeType,
 		authorizer:   authorizer,
-		clusterInfo:  clusterInfo,
+		kubeConfig:   kubeConfig,
 	}
+}
+
+// Get Cluster Version via API
+func (c *Client) getClusterVersion() (*configv1.ClusterVersion, error) {
+	if c.clusterVersion != nil {
+		return c.clusterVersion, nil
+	}
+	ctx := context.Background()
+	client, err := configv1client.NewForConfig(c.kubeConfig)
+	cv, err := client.ClusterVersions().Get(ctx, "version", metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+	c.clusterVersion = cv
+	return cv, nil
 }
 
 func getTrustedCABundle() (*x509.CertPool, error) {
@@ -146,8 +160,8 @@ func (c *Client) GetMimeType() string {
 
 // Send Posts source data to an endpoint
 func (c *Client) Send(ctx context.Context, endpoint string, source Source) error {
-	cv := c.clusterInfo.ClusterVersion()
-	if cv == nil {
+	cv, err := c.getClusterVersion()
+	if err != nil || cv == nil {
 		return ErrWaitingForVersion
 	}
 
