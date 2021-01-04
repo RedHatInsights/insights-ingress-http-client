@@ -142,7 +142,8 @@ func (c *Controller) Run(ctx context.Context) {
 				Contents: source,
 			}); err != nil {
 				klog.V(2).Infof("Unable to upload report after %s: %v", time.Now().Sub(start).Truncate(time.Second/100), err)
-				if err == insightsclient.ErrWaitingForVersion {
+				versionError := err == insightsclient.ErrWaitingForVersion || err == insightsclient.ErrObtainingForVersion
+				if versionError {
 					initialDelay = wait.Jitter(interval/8, 1) - interval/8
 					if c.reporter.SafeInitialStart() {
 						initialDelay = wait.Jitter(time.Second*15, 1)

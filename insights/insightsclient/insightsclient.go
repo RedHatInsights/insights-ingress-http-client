@@ -66,6 +66,9 @@ type Source struct {
 // ErrWaitingForVersion An error due to cluster version responding slowly
 var ErrWaitingForVersion = fmt.Errorf("waiting for the cluster version to be loaded")
 
+// ErrObtainingForVersion An error due to cluster version client collection
+var ErrObtainingForVersion = fmt.Errorf("waiting for the cluster version to be loaded")
+
 // New Initialize a new client object
 func New(client *http.Client, maxBytes int64, metricsName string, operatorName string, mimeType string, authorizer Authorizer, kubeConfig *rest.Config) *Client {
 	if client == nil {
@@ -92,6 +95,9 @@ func (c *Client) getClusterVersion() (*configv1.ClusterVersion, error) {
 	}
 	ctx := context.Background()
 	client, err := configv1client.NewForConfig(c.kubeConfig)
+	if err != nil {
+		return nil, err
+	}
 	cv, err := client.ClusterVersions().Get(ctx, "version", metav1.GetOptions{})
 	if err != nil {
 		return nil, err
@@ -161,7 +167,10 @@ func (c *Client) GetMimeType() string {
 // Send Posts source data to an endpoint
 func (c *Client) Send(ctx context.Context, endpoint string, source Source) error {
 	cv, err := c.getClusterVersion()
-	if err != nil || cv == nil {
+	if err != nil {
+		return ErrObtainingForVersion
+	}
+	if cv == nil {
 		return ErrWaitingForVersion
 	}
 
