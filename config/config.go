@@ -1,20 +1,12 @@
 package config
 
-import (
-	"time"
-)
-
 // Configuration defines the standard config for this operator.
 type Configuration struct {
-	Report               bool
-	StoragePath          string
-	Interval             time.Duration
-	Endpoint             string
-	ReportEndpoint       string
-	ReportPullingDelay   time.Duration
-	ReportMinRetryTime   time.Duration
-	ReportPullingTimeout time.Duration
-	Impersonate          string
+	Report         bool
+	StoragePath    string
+	Endpoint       string
+	ReportEndpoint string
+	Impersonate    string
 
 	Username string
 	Password string

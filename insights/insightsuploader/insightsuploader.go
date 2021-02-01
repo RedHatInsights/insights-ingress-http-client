@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
 	"time"
 
 	"k8s.io/klog"
@@ -64,6 +65,32 @@ func New(summarizer Summarizer, client *insightsclient.Client, configurator Conf
 	}
 }
 
+func (c *Controller) upload(ctx context.Context, cfg *config.Configuration, start time.Time, sourceIndex int, source io.ReadCloser) error {
+	endpoint := cfg.Endpoint
+	id := start.Format(time.RFC3339) + "-" + strconv.Itoa(sourceIndex)
+	if err := c.client.Send(ctx, endpoint, insightsclient.Source{
+		ID:       id,
+		Type:     c.client.GetMimeType(),
+		Contents: source,
+	}); err != nil {
+		klog.V(2).Infof("Unable to upload report after %s: %v", time.Now().Sub(start).Truncate(time.Second/100), err)
+		versionError := err == insightsclient.ErrWaitingForVersion || err == insightsclient.ErrObtainingForVersion
+		if versionError {
+			return err
+		}
+		c.reporter.SetSafeInitialStart(false)
+		if authorizer.IsAuthorizationError(err) {
+			c.Simple.UpdateStatus(controllerstatus.Summary{Operation: controllerstatus.Uploading,
+				Reason: "NotAuthorized", Message: fmt.Sprintf("Reporting was not allowed: %v", err)})
+			return err
+		}
+		c.Simple.UpdateStatus(controllerstatus.Summary{Operation: controllerstatus.Uploading,
+			Reason: "UploadFailed", Message: fmt.Sprintf("Unable to report: %v", err)})
+		return err
+	}
+	return nil
+}
+
 // Run Execute the payload upload
 func (c *Controller) Run(ctx context.Context) {
 	c.Simple.UpdateStatus(controllerstatus.Summary{Healthy: true})
@@ -75,110 +102,60 @@ func (c *Controller) Run(ctx context.Context) {
 
 	// the controller periodically uploads results to the remote insights endpoint
 	cfg := c.configurator.Config()
-	configCh, cancelFn := c.configurator.ConfigChanged()
+	_, cancelFn := c.configurator.ConfigChanged()
 	defer cancelFn()
 
 	enabled := cfg.Report
 	endpoint := cfg.Endpoint
-	interval := cfg.Interval
-	initialDelay := wait.Jitter(interval/8, 2)
 	lastReported := c.reporter.LastReportedTime()
-	if !lastReported.IsZero() {
-		next := lastReported.Add(interval)
-		if now := time.Now(); next.After(now) {
-			initialDelay = wait.Jitter(now.Sub(next), 1.2)
-		}
-	}
-	if c.reporter.SafeInitialStart() {
-		initialDelay = 0
-	}
-	klog.V(2).Infof("Reporting status periodically to %s every %s, starting in %s", cfg.Endpoint, interval, initialDelay.Truncate(time.Second))
 
 	wait.Until(func() {
-		if initialDelay > 0 {
-			select {
-			case <-ctx.Done():
-			case <-time.After(initialDelay):
-			case <-configCh:
-				newCfg := c.configurator.Config()
-				interval = newCfg.Interval
-				endpoint = newCfg.Endpoint
-				if newCfg.Report != enabled {
-					enabled = newCfg.Report
-					if !newCfg.Report {
-						klog.V(2).Infof("Reporting was disabled")
-						initialDelay = newCfg.Interval
-						return
-					}
-					klog.V(2).Infof("Reporting was enabled")
-				}
-			}
-			initialDelay = 0
-		}
-
 		// attempt to get a summary to send to the server
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
 
-		source, ok, err := c.summarizer.Summary(ctx, lastReported)
-		if err != nil {
-			c.Simple.UpdateStatus(controllerstatus.Summary{Reason: "SummaryFailed", Message: fmt.Sprintf("Unable to retrieve local insights data: %v", err)})
-			return
-		}
-		if !ok {
-			klog.V(4).Infof("Nothing to report since %s", lastReported.Format(time.RFC3339))
-			return
-		}
-		defer source.Close()
-
-		if enabled && len(endpoint) > 0 {
-			// send the results
+		if len(endpoint) > 0 {
 			start := time.Now()
-			id := start.Format(time.RFC3339)
-			klog.V(4).Infof("Uploading latest report since %s", lastReported.Format(time.RFC3339))
-			if err := c.client.Send(ctx, endpoint, insightsclient.Source{
-				ID:       id,
-				Type:     c.client.GetMimeType(),
-				Contents: source,
-			}); err != nil {
-				klog.V(2).Infof("Unable to upload report after %s: %v", time.Now().Sub(start).Truncate(time.Second/100), err)
-				versionError := err == insightsclient.ErrWaitingForVersion || err == insightsclient.ErrObtainingForVersion
-				if versionError {
-					initialDelay = wait.Jitter(interval/8, 1) - interval/8
-					if c.reporter.SafeInitialStart() {
-						initialDelay = wait.Jitter(time.Second*15, 1)
+			sourceIndex := 0
+			var source io.ReadCloser
+			var ok bool
+			var err error
+			for source, ok, err = c.summarizer.Summary(ctx, lastReported); err == nil && ok; source, ok, err = c.summarizer.Summary(ctx, lastReported) {
+				defer source.Close()
+				if enabled {
+					// send the results
+					klog.V(4).Infof("Uploading latest report since %s", lastReported.Format(time.RFC3339))
+					err = c.upload(ctx, cfg, start, sourceIndex, source)
+					if err != nil {
+						return
 					}
-					return
+					c.reporter.SetSafeInitialStart(false)
+					klog.V(4).Infof("Uploaded report successfully in %s", time.Now().Sub(start))
+				} else {
+					klog.V(4).Info("Display report that would be sent")
+					// display what would have been sent (to ensure we always exercise source processing)
+					if err := reportToLogs(source, klog.V(4)); err != nil {
+						klog.Errorf("Unable to log upload: %v", err)
+					}
+					// we didn't actually report logs, so don't advance the report date
 				}
-				c.reporter.SetSafeInitialStart(false)
-				if authorizer.IsAuthorizationError(err) {
-					c.Simple.UpdateStatus(controllerstatus.Summary{Operation: controllerstatus.Uploading,
-						Reason: "NotAuthorized", Message: fmt.Sprintf("Reporting was not allowed: %v", err)})
-					initialDelay = wait.Jitter(interval, 3)
-					return
-				}
-
-				initialDelay = wait.Jitter(interval/8, 1.2)
-				c.Simple.UpdateStatus(controllerstatus.Summary{Operation: controllerstatus.Uploading,
-					Reason: "UploadFailed", Message: fmt.Sprintf("Unable to report: %v", err)})
+				sourceIndex = sourceIndex + 1
+			}
+			if err != nil {
+				c.Simple.UpdateStatus(controllerstatus.Summary{Reason: "SummaryFailed", Message: fmt.Sprintf("Unable to retrieve local data: %v", err)})
 				return
 			}
-			c.reporter.SetSafeInitialStart(false)
-			klog.V(4).Infof("Uploaded report successfully in %s", time.Now().Sub(start))
-			lastReported = start.UTC()
-			c.Simple.UpdateStatus(controllerstatus.Summary{Healthy: true})
-		} else {
-			klog.V(4).Info("Display report that would be sent")
-			// display what would have been sent (to ensure we always exercise source processing)
-			if err := reportToLogs(source, klog.V(4)); err != nil {
-				klog.Errorf("Unable to log upload: %v", err)
+			if !ok {
+				klog.V(4).Infof("Nothing to report since %s", lastReported.Format(time.RFC3339))
+				return
 			}
-			// we didn't actually report logs, so don't advance the report date
+			if enabled && err == nil {
+				lastReported = start.UTC()
+				c.Simple.UpdateStatus(controllerstatus.Summary{Healthy: true})
+			}
 		}
 
 		c.reporter.SetLastReportedTime(lastReported)
-
-		initialDelay = wait.Jitter(interval, 1.2)
 	}, 15*time.Second, ctx.Done())
 }
 
