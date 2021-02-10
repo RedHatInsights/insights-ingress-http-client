@@ -14,15 +14,12 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
-	"strconv"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/pkg/version"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
-	"k8s.io/component-base/metrics"
-	"k8s.io/component-base/metrics/legacyregistry"
 
 	"k8s.io/klog"
 
@@ -41,7 +38,6 @@ const (
 type Client struct {
 	client       *http.Client
 	maxBytes     int64
-	metricsName  string
 	operatorName string
 	mimeType     string
 
@@ -70,7 +66,7 @@ var ErrWaitingForVersion = fmt.Errorf("waiting for the cluster version to be loa
 var ErrObtainingForVersion = fmt.Errorf("waiting for the cluster version to be loaded")
 
 // New Initialize a new client object
-func New(client *http.Client, maxBytes int64, metricsName string, operatorName string, mimeType string, authorizer Authorizer, kubeConfig *rest.Config) *Client {
+func New(client *http.Client, maxBytes int64, operatorName string, mimeType string, authorizer Authorizer, kubeConfig *rest.Config) *Client {
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -80,7 +76,6 @@ func New(client *http.Client, maxBytes int64, metricsName string, operatorName s
 	return &Client{
 		client:       client,
 		maxBytes:     maxBytes,
-		metricsName:  metricsName,
 		operatorName: operatorName,
 		mimeType:     mimeType,
 		authorizer:   authorizer,
@@ -221,8 +216,6 @@ func (c *Client) Send(ctx context.Context, endpoint string, source Source) error
 	resp, err := c.client.Do(req)
 	if err != nil {
 		klog.V(4).Infof("Unable to build a request, possible invalid token: %v", err)
-		// if the request is not build, for example because of invalid endpoint,(maybe some problem with DNS), we want to have record about it in metrics as well.
-		counterRequestSend.WithLabelValues(c.metricsName, "0").Inc()
 		return fmt.Errorf("unable to build request to connect to Insights server: %v", err)
 	}
 
@@ -236,8 +229,6 @@ func (c *Client) Send(ctx context.Context, endpoint string, source Source) error
 			klog.Warningf("Failed to close response body: %v", err)
 		}
 	}()
-
-	counterRequestSend.WithLabelValues(c.metricsName, strconv.Itoa(resp.StatusCode)).Inc()
 
 	if resp.StatusCode == http.StatusUnauthorized {
 		klog.V(2).Infof("gateway server %s returned 401, x-rh-insights-request-id=%s", resp.Request.URL, requestID)
@@ -273,21 +264,4 @@ func responseBody(r *http.Response) string {
 		body = body[:responseBodyLogLen]
 	}
 	return string(body)
-}
-
-var (
-	counterRequestSend = metrics.NewCounterVec(&metrics.CounterOpts{
-		Name: "insightsclient_request_send_total",
-		Help: "Tracks the number of metrics sends",
-	}, []string{"client", "status_code"})
-)
-
-func init() {
-	err := legacyregistry.Register(
-		counterRequestSend,
-	)
-	if err != nil {
-		fmt.Println(err)
-	}
-
 }

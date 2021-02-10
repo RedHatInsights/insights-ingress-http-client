@@ -8,7 +8,6 @@ require (
 	golang.org/x/net v0.0.0-20201209123823-ac852fbbde11
 	k8s.io/apimachinery v0.20.0
 	k8s.io/client-go v11.0.0+incompatible
-	k8s.io/component-base v0.20.0
 	k8s.io/klog v1.0.0
 )
 
