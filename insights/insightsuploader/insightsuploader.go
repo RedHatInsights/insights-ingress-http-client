@@ -14,29 +14,19 @@ import (
 	"github.com/redhatinsights/insights-ingress-http-client/config"
 	"github.com/redhatinsights/insights-ingress-http-client/controllerstatus"
 	"github.com/redhatinsights/insights-ingress-http-client/insights/insightsclient"
+	"github.com/redhatinsights/insights-ingress-http-client/insights/source"
 )
 
-// Configurator An interface for managing the configuration data
-type Configurator interface {
-	Config() *config.Configuration
-	ConfigChanged() (<-chan struct{}, func())
-}
-
-// Authorizer An interface for determining if an error is related to authorization
-type Authorizer interface {
-	IsAuthorizationError(error) bool
-}
-
-// Controller An object for processing a summary
+// Controller An object for processing an upload
 type Controller struct {
 	controllerstatus.Simple
 
 	client       *insightsclient.Client
-	configurator Configurator
+	configurator config.Configurator
 }
 
 // New Initialize a new Controller object
-func New(client *insightsclient.Client, configurator Configurator) *Controller {
+func New(client *insightsclient.Client, configurator config.Configurator) *Controller {
 	return &Controller{
 		Simple:       controllerstatus.Simple{Name: "insightsuploader"},
 		configurator: configurator,
@@ -45,7 +35,7 @@ func New(client *insightsclient.Client, configurator Configurator) *Controller {
 }
 
 // Upload Execute the payload upload
-func (c *Controller) Upload(ctx context.Context, source io.ReadCloser) {
+func (c *Controller) Upload(ctx context.Context, data io.ReadCloser, mimeType string) {
 	c.Simple.UpdateStatus(controllerstatus.Summary{Healthy: true})
 
 	if c.client == nil {
@@ -53,29 +43,24 @@ func (c *Controller) Upload(ctx context.Context, source io.ReadCloser) {
 		return
 	}
 
-	// the controller periodically uploads results to the remote insights endpoint
-	cfg := c.configurator.Config()
-	_, cancelFn := c.configurator.ConfigChanged()
-	defer cancelFn()
+	enabled := c.configurator.IsEnabled()
+	endpoint := c.configurator.GetEndpoint()
 
-	enabled := cfg.Report
-	endpoint := cfg.Endpoint
-
-	if source == nil {
+	if data == nil {
 		klog.V(4).Infof("Nothing to report")
 		return
 	}
-	defer source.Close()
+	defer data.Close()
 
 	if enabled && len(endpoint) > 0 {
 		// send the results
 		start := time.Now()
 		id := start.Format(time.RFC3339)
 		klog.V(4).Infof("Uploading report at %s", start.Format(time.RFC3339))
-		if err := c.client.Send(ctx, endpoint, insightsclient.Source{
+		if err := c.client.Send(ctx, endpoint, source.Source{
 			ID:       id,
-			Type:     c.client.GetMimeType(),
-			Contents: source,
+			Type:     mimeType,
+			Contents: data,
 		}); err != nil {
 			klog.V(2).Infof("Unable to upload report after %s: %v", time.Now().Sub(start).Truncate(time.Second/100), err)
 			versionError := err == insightsclient.ErrWaitingForVersion || err == insightsclient.ErrObtainingForVersion
@@ -96,7 +81,7 @@ func (c *Controller) Upload(ctx context.Context, source io.ReadCloser) {
 	} else {
 		klog.V(4).Info("Display report that would be sent")
 		// display what would have been sent (to ensure we always exercise source processing)
-		if err := reportToLogs(source, klog.V(4)); err != nil {
+		if err := reportToLogs(data, klog.V(4)); err != nil {
 			klog.Errorf("Unable to log upload: %v", err)
 		}
 		// we didn't actually report logs, so don't advance the report date
