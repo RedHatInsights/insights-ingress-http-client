@@ -77,6 +77,10 @@ func New(client *http.Client, maxBytes int64, metricsName string, operatorName s
 	if maxBytes == 0 {
 		maxBytes = 10 * 1024 * 1024
 	}
+	err := registerSendMetric(metricsName)
+	if err != nil {
+		klog.Warningf("failed to register metrics %s: %v", metricsName, err)
+	}
 	return &Client{
 		client:       client,
 		maxBytes:     maxBytes,
@@ -277,17 +281,18 @@ func responseBody(r *http.Response) string {
 
 var (
 	counterRequestSend = metrics.NewCounterVec(&metrics.CounterOpts{
-		Name: "insightsclient_request_send_total",
-		Help: "Tracks the number of metrics sends",
+		Help: "Counter of the number of uploads sent",
 	}, []string{"client", "status_code"})
 )
 
-func init() {
+func registerSendMetric(metricName string) error {
+	counterRequestSend.Name = fmt.Sprintf("%s_request_send_total", metricName)
+
 	err := legacyregistry.Register(
 		counterRequestSend,
 	)
 	if err != nil {
-		fmt.Println(err)
+		return err
 	}
-
+	return nil
 }
