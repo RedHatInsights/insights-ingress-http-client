@@ -51,11 +51,8 @@ func (c *ClusterVersionCollector) GetClusterID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	clusterID := ""
-	if cv.Spec.ClusterID != "" {
-		clusterID = string(cv.Spec.ClusterID)
-	} else {
-		err = fmt.Errorf("No cluster ID found in ClusterVersion Spec")
+	if cv.Spec.ClusterID == "" {
+		return "", fmt.Errorf("No cluster ID found in ClusterVersion Spec")
 	}
-	return clusterID, err
+	return string(cv.Spec.ClusterID), nil
 }
