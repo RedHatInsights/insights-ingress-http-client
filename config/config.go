@@ -1,31 +1,23 @@
 package config
 
-import (
-	"time"
-)
-
-// Configuration defines the standard config for this operator.
-type Configuration struct {
-	Report               bool
-	StoragePath          string
-	Interval             time.Duration
-	Endpoint             string
-	ReportEndpoint       string
-	ReportPullingDelay   time.Duration
-	ReportMinRetryTime   time.Duration
-	ReportPullingTimeout time.Duration
-	Impersonate          string
-
-	Username string
-	Password string
-	Token    string
-
-	HTTPConfig HTTPConfig
+// Configurator An interface for handling the upload configuration
+type Configurator interface {
+	IsEnabled() bool
+	GetEndpoint() string
 }
 
-// HTTPConfig configures http proxy and exception settings if they come from config
-type HTTPConfig struct {
-	HTTPProxy  string
-	HTTPSProxy string
-	NoProxy    string
+// SimpleConfigurator defines the standard config for this operator.
+type SimpleConfigurator struct {
+	Report   bool
+	Endpoint string
+}
+
+// IsEnabled Returns the seting for the configuration
+func (s *SimpleConfigurator) IsEnabled() bool {
+	return s.Report
+}
+
+// GetEndpoint Returns the endpoint for the configuration
+func (s *SimpleConfigurator) GetEndpoint() string {
+	return s.Endpoint
 }

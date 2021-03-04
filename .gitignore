@@ -16,3 +16,6 @@ vendor/
 
 # Generated cluster role from make file
 manifests/cluster_role.yaml
+
+# Ignore vscode settings
+.vscode/

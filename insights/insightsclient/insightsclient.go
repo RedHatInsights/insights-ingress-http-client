@@ -1,6 +1,7 @@
 package insightsclient
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -12,25 +13,20 @@ import (
 	"net"
 	"net/http"
 	"net/textproto"
-	"net/url"
 	"os"
 	"strconv"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/pkg/version"
-	"k8s.io/client-go/rest"
 	"k8s.io/client-go/transport"
 	"k8s.io/component-base/metrics"
 	"k8s.io/component-base/metrics/legacyregistry"
 
 	"k8s.io/klog"
 
-	configv1 "github.com/openshift/api/config/v1"
-	configv1client "github.com/openshift/client-go/config/clientset/versioned/typed/config/v1"
-	apimachineryversion "k8s.io/apimachinery/pkg/version"
-
 	"github.com/redhatinsights/insights-ingress-http-client/authorizer"
+	"github.com/redhatinsights/insights-ingress-http-client/insights/proxycontrol"
+	"github.com/redhatinsights/insights-ingress-http-client/insights/requestdecorator"
+	"github.com/redhatinsights/insights-ingress-http-client/insights/source"
 )
 
 const (
@@ -41,26 +37,10 @@ const (
 type Client struct {
 	client       *http.Client
 	maxBytes     int64
+	certPath     string
 	metricsName  string
-	operatorName string
-	mimeType     string
-
-	authorizer     Authorizer
-	kubeConfig     *rest.Config
-	clusterVersion *configv1.ClusterVersion
-}
-
-// Authorizer An interface for adding authorization and proxy information the request
-type Authorizer interface {
-	Authorize(req *http.Request) error
-	NewSystemOrConfiguredProxy() func(*http.Request) (*url.URL, error)
-}
-
-// Source An object for storing data of multiple types
-type Source struct {
-	ID       string
-	Type     string
-	Contents io.Reader
+	proxyCtrl    *proxycontrol.ProxyControl
+	reqDecorator *requestdecorator.RequestDecorator
 }
 
 // ErrWaitingForVersion An error due to cluster version responding slowly
@@ -70,7 +50,7 @@ var ErrWaitingForVersion = fmt.Errorf("waiting for the cluster version to be loa
 var ErrObtainingForVersion = fmt.Errorf("waiting for the cluster version to be loaded")
 
 // New Initialize a new client object
-func New(client *http.Client, maxBytes int64, metricsName string, operatorName string, mimeType string, authorizer Authorizer, kubeConfig *rest.Config) *Client {
+func New(client *http.Client, maxBytes int64, certPath string, metricsName string, proxyCtrl *proxycontrol.ProxyControl, reqDecorator *requestdecorator.RequestDecorator) *Client {
 	if client == nil {
 		client = &http.Client{}
 	}
@@ -84,34 +64,15 @@ func New(client *http.Client, maxBytes int64, metricsName string, operatorName s
 	return &Client{
 		client:       client,
 		maxBytes:     maxBytes,
+		certPath:     certPath,
 		metricsName:  metricsName,
-		operatorName: operatorName,
-		mimeType:     mimeType,
-		authorizer:   authorizer,
-		kubeConfig:   kubeConfig,
+		proxyCtrl:    proxyCtrl,
+		reqDecorator: reqDecorator,
 	}
 }
 
-// Get Cluster Version via API
-func (c *Client) getClusterVersion() (*configv1.ClusterVersion, error) {
-	if c.clusterVersion != nil {
-		return c.clusterVersion, nil
-	}
-	ctx := context.Background()
-	client, err := configv1client.NewForConfig(c.kubeConfig)
-	if err != nil {
-		return nil, err
-	}
-	cv, err := client.ClusterVersions().Get(ctx, "version", metav1.GetOptions{})
-	if err != nil {
-		return nil, err
-	}
-	c.clusterVersion = cv
-	return cv, nil
-}
-
-func getTrustedCABundle() (*x509.CertPool, error) {
-	caBytes, err := ioutil.ReadFile("/var/run/configmaps/trusted-ca-bundle/ca-bundle.crt") //Should this be parameterized?
+func (c *Client) getTrustedCABundle() (*x509.CertPool, error) {
+	caBytes, err := ioutil.ReadFile(c.certPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -129,9 +90,10 @@ func getTrustedCABundle() (*x509.CertPool, error) {
 }
 
 // clientTransport creates new http.Transport with either system or configured Proxy
-func clientTransport(authorizer Authorizer) http.RoundTripper {
+func (c *Client) clientTransport() http.RoundTripper {
+	prxy := *(c.proxyCtrl)
 	clientTransport := &http.Transport{
-		Proxy: authorizer.NewSystemOrConfiguredProxy(),
+		Proxy: prxy.NewSystemOrConfiguredProxy(),
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
@@ -141,7 +103,7 @@ func clientTransport(authorizer Authorizer) http.RoundTripper {
 	}
 
 	// get the cluster proxy trusted CA bundle in case the proxy need it
-	rootCAs, err := getTrustedCABundle()
+	rootCAs, err := c.getTrustedCABundle()
 	if err != nil {
 		klog.Errorf("Failed to get proxy trusted CA: %v", err)
 	}
@@ -153,60 +115,44 @@ func clientTransport(authorizer Authorizer) http.RoundTripper {
 	return transport.DebugWrappers(clientTransport)
 }
 
-func userAgent(operatorName string, releaseVersionEnv string, v apimachineryversion.Info, cv *configv1.ClusterVersion) string {
-	gitVersion := v.GitVersion
-	// If the RELEASE_VERSION is set in pod, use it
-	if releaseVersionEnv != "" {
-		gitVersion = releaseVersionEnv
-	}
-	gitVersion = fmt.Sprintf("%s-%s", gitVersion, v.GitCommit)
-	return fmt.Sprintf("%s/%s cluster/%s", operatorName, gitVersion, cv.Spec.ClusterID)
-}
-
-// GetMimeType Accessor for the client mimeType
-func (c *Client) GetMimeType() string {
-	return c.mimeType
-}
-
-// Send Posts source data to an endpoint
-func (c *Client) Send(ctx context.Context, endpoint string, source Source) error {
-	cv, err := c.getClusterVersion()
+// SetupRequest creates a new request, adds headers to request object for communication, and returns the request
+func (c *Client) SetupRequest(ctx context.Context, method, uri string, body *bytes.Buffer, contentType string) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, uri, body)
 	if err != nil {
-		return ErrObtainingForVersion
-	}
-	if cv == nil {
-		return ErrWaitingForVersion
-	}
-
-	req, err := http.NewRequest("POST", endpoint, nil)
-	if err != nil {
-		return err
+		return nil, fmt.Errorf("could not create request: %v", err)
 	}
 
 	if req.Header == nil {
 		req.Header = make(http.Header)
 	}
-	releaseVersionEnv := os.Getenv("RELEASE_VERSION")
-	ua := userAgent(c.operatorName, releaseVersionEnv, version.Get(), cv)
-	req.Header.Set("User-Agent", ua)
-	if err := c.authorizer.Authorize(req); err != nil {
-		return err
-	}
+	c.reqDecorator.UpdateHeaders(req, contentType)
 
+	// dynamically set the proxy environment
+	c.client.Transport = c.clientTransport()
+
+	return req, nil
+}
+
+// GetMultiPartBodyAndHeaders Get multi-part body and headers for upload
+func (c *Client) GetMultiPartBodyAndHeaders(req *http.Request, data source.Source) int64 {
+	// set the content and content type
 	var bytesRead int64
 	pr, pw := io.Pipe()
 	mw := multipart.NewWriter(pw)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
+	filename := "payload.tar.gz"
+	if data.Filename != "" {
+		filename = data.Filename
+	}
 	go func() {
 		h := make(textproto.MIMEHeader)
-		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, "file", "payload.tar.gz"))
-		h.Set("Content-Type", source.Type)
+		h.Set("Content-Disposition", fmt.Sprintf(`form-data; name=%q; filename=%q`, "file", filename))
+		h.Set("Content-Type", data.Type)
 		fw, err := mw.CreatePart(h)
 		if err != nil {
 			pw.CloseWithError(err)
 			return
 		}
-		r := &LimitedReader{R: source.Contents, N: c.maxBytes}
+		r := &LimitedReader{R: data.Contents, N: c.maxBytes}
 		n, err := io.Copy(fw, r)
 		bytesRead = n
 		if err != nil {
@@ -214,14 +160,18 @@ func (c *Client) Send(ctx context.Context, endpoint string, source Source) error
 		}
 		pw.CloseWithError(mw.Close())
 	}()
-
-	req = req.WithContext(ctx)
 	req.Body = pr
+	return bytesRead
+}
 
-	// dynamically set the proxy environment
-	c.client.Transport = clientTransport(c.authorizer)
-
-	klog.V(4).Infof("Uploading %s to %s", source.Type, req.URL.String())
+// Send Posts source data to an endpoint
+func (c *Client) Send(ctx context.Context, endpoint string, data source.Source) error {
+	req, err := c.SetupRequest(ctx, "POST", endpoint, nil, data.Type)
+	if err != nil {
+		return err
+	}
+	bytesRead := c.GetMultiPartBodyAndHeaders(req, data)
+	klog.V(4).Infof("Uploading %s to %s", data.Type, req.URL.String())
 	resp, err := c.client.Do(req)
 	if err != nil {
 		klog.V(4).Infof("Unable to build a request, possible invalid token: %v", err)
@@ -262,7 +212,7 @@ func (c *Client) Send(ctx context.Context, endpoint string, source Source) error
 	}
 
 	if len(requestID) > 0 {
-		klog.V(2).Infof("Successfully reported id=%s x-rh-insights-request-id=%s, wrote=%d", source.ID, requestID, bytesRead)
+		klog.V(2).Infof("Successfully reported id=%s x-rh-insights-request-id=%s, wrote=%d", data.ID, requestID, bytesRead)
 	}
 
 	return nil
